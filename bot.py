@@ -1,11 +1,10 @@
 import os
 import re
 import time
-import asyncio
+import subprocess
 import threading
 import tempfile
 import requests
-import edge_tts
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -30,6 +29,7 @@ REGLAS:
 """
 
 user_histories = {}
+processed_updates = set()  # Evitar procesar el mismo mensaje dos veces
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -69,49 +69,46 @@ def send_voice_file(chat_id, filepath):
             data={"chat_id": chat_id},
             files={"voice": audio}
         )
-        print(f"sendVoice response: {resp.status_code} {resp.text[:200]}")
+        print(f"sendVoice: {resp.status_code} - {resp.text[:300]}")
 
 
 def speak_english(chat_id, text):
-    """Genera y envía audio en inglés americano usando un hilo separado."""
+    """Genera audio con edge-tts via subprocess y lo envía."""
     try:
-        print(f"Generando audio para: {text}")
+        print(f"Generando audio: {text}")
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             output_path = f.name
 
-        result = {"error": None}
+        result = subprocess.run(
+            ["edge-tts", "--voice", VOICE_EN, "--text", text, "--write-media", output_path],
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
 
-        def run_tts():
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    edge_tts.Communicate(text, VOICE_EN).save(output_path)
-                )
-                loop.close()
-            except Exception as e:
-                result["error"] = e
+        print(f"edge-tts stdout: {result.stdout}")
+        print(f"edge-tts stderr: {result.stderr}")
+        print(f"edge-tts returncode: {result.returncode}")
 
-        tts_thread = threading.Thread(target=run_tts)
-        tts_thread.start()
-        tts_thread.join(timeout=30)
+        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+            send_voice_file(chat_id, output_path)
+            print("Audio enviado!")
+        else:
+            print(f"Error generando audio: {result.stderr}")
 
-        if result["error"]:
-            raise result["error"]
+        if os.path.exists(output_path):
+            os.unlink(output_path)
 
-        send_voice_file(chat_id, output_path)
-        os.unlink(output_path)
-        print("Audio enviado exitosamente")
     except Exception as e:
         print(f"Error en TTS: {e}")
 
 
 def get_english_phrase(spanish_reply, user_input):
     """Obtiene la frase en inglés que el usuario debe practicar."""
-    prompt = f"""A student said or wrote: "{user_input}"
-The tutor responded in Spanish: "{spanish_reply}"
+    prompt = f"""Student said: "{user_input}"
+Tutor replied in Spanish: "{spanish_reply}"
 
-Write ONLY the English sentence the student should practice. No explanations, no Spanish. Just the English sentence."""
+Write ONLY the correct English sentence the student should practice. No explanations. Only English."""
 
     response = requests.post(
         GROQ_CHAT_URL,
@@ -119,7 +116,7 @@ Write ONLY the English sentence the student should practice. No explanations, no
         json={
             "model": "llama-3.3-70b-versatile",
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 100
+            "max_tokens": 80
         }
     )
     data = response.json()
@@ -162,9 +159,7 @@ def transcribe_voice(file_id):
                 data={"model": "whisper-large-v3", "language": "en"}
             )
         os.unlink(temp_path)
-        data = response.json()
-        print(f"Whisper: {data}")
-        return data.get("text", "")
+        return response.json().get("text", "")
     except Exception as e:
         print(f"Error transcribiendo: {e}")
         return ""
@@ -175,7 +170,7 @@ def process_message(chat_id, user_id, user_text, is_voice=False):
         user_histories[user_id] = []
 
     history = user_histories[user_id]
-    content = f"[Mensaje de VOZ. Transcripción: '{user_text}']. Corrígelo si hay errores." if is_voice else user_text
+    content = f"[VOZ transcrita: '{user_text}']. Corrígelo si hay errores." if is_voice else user_text
     history.append({"role": "user", "content": content})
 
     send_typing(chat_id)
@@ -183,17 +178,27 @@ def process_message(chat_id, user_id, user_text, is_voice=False):
     history.append({"role": "assistant", "content": reply})
     user_histories[user_id] = history[-20:]
 
-    # Texto en español
     send_message(chat_id, reply)
 
-    # Audio en inglés americano
     english_phrase = get_english_phrase(reply, user_text)
     if english_phrase:
-        send_message(chat_id, "🇺🇸 Escucha la pronunciación en inglés americano:")
+        send_message(chat_id, "🇺🇸 Pronunciación en inglés americano:")
         speak_english(chat_id, english_phrase)
 
 
 def handle_update(update):
+    update_id = update["update_id"]
+
+    # Evitar doble procesamiento
+    if update_id in processed_updates:
+        return
+    processed_updates.add(update_id)
+
+    # Limpiar cache viejo (mantener solo los últimos 100)
+    if len(processed_updates) > 100:
+        min_id = min(processed_updates)
+        processed_updates.discard(min_id)
+
     if "message" not in update:
         return
 
@@ -220,11 +225,10 @@ def handle_update(update):
         send_message(chat_id,
             "Hola! Soy tu Tutor de Ingles Americano AI 🎓🇺🇸\n\n"
             "Puedes:\n"
-            "🎤 Enviarme mensajes de VOZ en ingles y te corrijo\n"
-            "📝 Escribirme en espanol y te enseno como decirlo\n"
-            "✍️ Escribirme en ingles y te corrijo los errores\n"
-            "📚 Pedir ejercicios con /ejercicio\n\n"
-            "Siempre escucharas la pronunciacion en ingles americano! 🔊\n\n"
+            "🎤 Voz en ingles → te corrijo y escuchas la pronunciacion correcta\n"
+            "📝 Espanol → te enseno como decirlo en ingles\n"
+            "✍️ Ingles escrito → te corrijo los errores\n"
+            "📚 /ejercicio → practica guiada\n\n"
             "Por donde quieres empezar? 😊"
         )
         return
@@ -236,23 +240,22 @@ def handle_update(update):
 
     if text == "/help":
         send_message(chat_id,
-            "Comandos:\n"
             "/start - Iniciar\n"
             "/reset - Borrar historial\n"
-            "/ejercicio - Recibir ejercicio\n"
-            "/help - Ver ayuda"
+            "/ejercicio - Ejercicio practico\n"
+            "/help - Ayuda"
         )
         return
 
     if text == "/ejercicio":
-        text = "Dame un ejercicio corto de ingles americano para practicar ahora."
+        text = "Dame un ejercicio corto de ingles americano para practicar."
 
     process_message(chat_id, user_id, text, is_voice=False)
 
 
 def main():
     threading.Thread(target=run_server, daemon=True).start()
-    print("Bot iniciado con audio en ingles americano!")
+    print("Bot iniciado!")
 
     offset = 0
     while True:
