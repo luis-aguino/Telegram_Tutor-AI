@@ -5,10 +5,11 @@ import requests
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GROQ_API_KEY = os.environ["GROQ_API_KEY"]
 
 TELEGRAM_BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key={GEMINI_API_KEY}"
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
 SYSTEM_PROMPT = """Eres un tutor de inglés amigable, paciente y motivador llamado "Tutor AI". 
 Tu misión es ayudar a hispanohablantes a aprender inglés de forma práctica y divertida.
 
@@ -19,9 +20,17 @@ REGLAS:
 - Usa emojis para hacer las conversaciones más amenas.
 - Adapta el nivel de dificultad al usuario (detecta si es principiante, intermedio o avanzado).
 - Da ejercicios prácticos cuando sea apropiado.
-- Si el usuario comete un error, muestra la forma correcta con formato: Error -> Correcto.
+- Si el usuario comete un error, muestra la forma correcta con formato: ❌ Error → ✅ Correcto.
 - Celebra los logros del usuario con entusiasmo.
 - Mantén las respuestas concisas (máximo 200 palabras) para no abrumar al usuario.
+
+TEMAS QUE PUEDES ENSEÑAR:
+- Vocabulario cotidiano
+- Gramática básica y avanzada
+- Frases útiles para viajes, trabajo, etc.
+- Conversación simulada
+- Verbos irregulares
+- Tiempos verbales
 """
 
 user_histories = {}
@@ -57,26 +66,33 @@ def send_typing(chat_id):
     })
 
 
-def ask_gemini(history):
-    payload = {
-        "system_instruction": {"parts": [{"text": SYSTEM_PROMPT}]},
-        "contents": history
-    }
-    response = requests.post(GEMINI_URL, json=payload)
+def ask_groq(history):
+    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
+
+    response = requests.post(
+        GROQ_URL,
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": "application/json"
+        },
+        json={
+            "model": "llama-3.3-70b-versatile",
+            "messages": messages,
+            "max_tokens": 500
+        }
+    )
+
     data = response.json()
+    print(f"Groq status: {response.status_code}")
+    print(f"Groq response: {data}")
 
-    # Mostrar respuesta completa en logs para diagnosticar
-    print(f"Gemini status: {response.status_code}")
-    print(f"Gemini response: {data}")
-
-    if "candidates" in data:
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+    if "choices" in data:
+        return data["choices"][0]["message"]["content"]
     elif "error" in data:
-        error_msg = data["error"].get("message", "Error desconocido")
-        print(f"Error de Gemini: {error_msg}")
-        return f"Error de Gemini: {error_msg}"
+        print(f"Error de Groq: {data['error']}")
+        return f"Error: {data['error'].get('message', 'Error desconocido')}"
     else:
-        return "Respuesta inesperada de Gemini."
+        return "Respuesta inesperada."
 
 
 def handle_update(update):
@@ -95,18 +111,28 @@ def handle_update(update):
     if text == "/start":
         user_histories[user_id] = []
         send_message(chat_id,
-            "Hola! Soy tu Tutor de Ingles AI\n\n"
+            "Hola! Soy tu Tutor de Ingles AI 🎓\n\n"
             "Puedes:\n"
             "- Escribirme en espanol y te enseno como decirlo en ingles\n"
             "- Escribirme en ingles y te corrijo si hay errores\n"
             "- Pedirme ejercicios con /ejercicio\n\n"
-            "Por donde quieres empezar?"
+            "Por donde quieres empezar? 😊"
         )
         return
 
     if text == "/reset":
         user_histories[user_id] = []
-        send_message(chat_id, "Conversacion reiniciada!")
+        send_message(chat_id, "Conversacion reiniciada! Que quieres aprender hoy?")
+        return
+
+    if text == "/help":
+        send_message(chat_id,
+            "Comandos disponibles:\n\n"
+            "/start - Iniciar el bot\n"
+            "/reset - Borrar historial\n"
+            "/ejercicio - Recibir un ejercicio\n"
+            "/help - Ver esta ayuda"
+        )
         return
 
     if text == "/ejercicio":
@@ -116,12 +142,12 @@ def handle_update(update):
         user_histories[user_id] = []
 
     history = user_histories[user_id]
-    history.append({"role": "user", "parts": [{"text": text}]})
+    history.append({"role": "user", "content": text})
 
     send_typing(chat_id)
-    reply = ask_gemini(history)
+    reply = ask_groq(history)
 
-    history.append({"role": "model", "parts": [{"text": reply}]})
+    history.append({"role": "assistant", "content": reply})
     user_histories[user_id] = history[-20:]
 
     send_message(chat_id, reply)
@@ -131,11 +157,9 @@ def main():
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
     print("Servidor web iniciado!")
-    print(f"Usando Gemini URL: {GEMINI_URL[:60]}...")
+    print("Bot iniciado con Groq!")
 
-    print("Bot iniciado!")
     offset = 0
-
     while True:
         try:
             response = requests.get(
