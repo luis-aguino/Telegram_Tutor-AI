@@ -1,7 +1,8 @@
 import os
-import re
+
+from gtts import gTTS
 import time
-import subprocess
+
 import threading
 import tempfile
 import requests
@@ -29,7 +30,6 @@ REGLAS:
 """
 
 user_histories = {}
-processed_updates = set()  # Evitar procesar el mismo mensaje dos veces
 
 
 class HealthHandler(BaseHTTPRequestHandler):
@@ -37,29 +37,21 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"Bot activo!")
-
     def log_message(self, format, *args):
         pass
 
 
 def run_server():
     port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(("0.0.0.0", port), HealthHandler)
-    server.serve_forever()
+    HTTPServer(("0.0.0.0", port), HealthHandler).serve_forever()
 
 
 def send_message(chat_id, text):
-    requests.post(f"{TELEGRAM_BASE}/sendMessage", json={
-        "chat_id": chat_id,
-        "text": text
-    })
+    requests.post(f"{TELEGRAM_BASE}/sendMessage", json={"chat_id": chat_id, "text": text})
 
 
 def send_typing(chat_id):
-    requests.post(f"{TELEGRAM_BASE}/sendChatAction", json={
-        "chat_id": chat_id,
-        "action": "typing"
-    })
+    requests.post(f"{TELEGRAM_BASE}/sendChatAction", json={"chat_id": chat_id, "action": "typing"})
 
 
 def send_voice_file(chat_id, filepath):
@@ -69,55 +61,40 @@ def send_voice_file(chat_id, filepath):
             data={"chat_id": chat_id},
             files={"voice": audio}
         )
-        print(f"sendVoice: {resp.status_code} - {resp.text[:300]}")
+        print(f"sendVoice: {resp.status_code} {resp.text[:200]}")
 
 
 def speak_english(chat_id, text):
-    """Genera audio con edge-tts via subprocess y lo envía."""
+    """Genera audio en inglés usando gTTS."""
     try:
-        print(f"Generando audio: {text}")
+        print(f"TTS para: {text}")
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             output_path = f.name
 
-        result = subprocess.run(
-            ["edge-tts", "--voice", VOICE_EN, "--text", text, "--write-media", output_path],
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
+        tts = gTTS(text=text, lang="en", tld="us", slow=False)
+        tts.save(output_path)
 
-        print(f"edge-tts stdout: {result.stdout}")
-        print(f"edge-tts stderr: {result.stderr}")
-        print(f"edge-tts returncode: {result.returncode}")
-
-        if result.returncode == 0 and os.path.exists(output_path) and os.path.getsize(output_path) > 0:
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
             send_voice_file(chat_id, output_path)
-            print("Audio enviado!")
+            print("Audio enviado correctamente")
         else:
-            print(f"Error generando audio: {result.stderr}")
+            print("Error: archivo de audio vacío")
 
         if os.path.exists(output_path):
             os.unlink(output_path)
-
     except Exception as e:
-        print(f"Error en TTS: {e}")
+        print(f"Error TTS: {e}")
 
 
 def get_english_phrase(spanish_reply, user_input):
-    """Obtiene la frase en inglés que el usuario debe practicar."""
-    prompt = f"""Student said: "{user_input}"
-Tutor replied in Spanish: "{spanish_reply}"
-
-Write ONLY the correct English sentence the student should practice. No explanations. Only English."""
+    prompt = f"""Student input: "{user_input}"
+Tutor Spanish response: "{spanish_reply}"
+Write ONLY the correct English sentence to practice. Nothing else. Just English."""
 
     response = requests.post(
         GROQ_CHAT_URL,
         headers={"Authorization": f"Bearer {GROQ_API_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": "llama-3.3-70b-versatile",
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 80
-        }
+        json={"model": "llama-3.3-70b-versatile", "messages": [{"role": "user", "content": prompt}], "max_tokens": 80}
     )
     data = response.json()
     if "choices" in data:
@@ -144,8 +121,7 @@ def transcribe_voice(file_id):
     try:
         file_info = requests.get(f"{TELEGRAM_BASE}/getFile?file_id={file_id}").json()
         file_path = file_info["result"]["file_path"]
-        file_url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}"
-        audio_data = requests.get(file_url).content
+        audio_data = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_path}").content
 
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as f:
             f.write(audio_data)
@@ -170,7 +146,7 @@ def process_message(chat_id, user_id, user_text, is_voice=False):
         user_histories[user_id] = []
 
     history = user_histories[user_id]
-    content = f"[VOZ transcrita: '{user_text}']. Corrígelo si hay errores." if is_voice else user_text
+    content = f"[VOZ: '{user_text}']. Corrígelo si hay errores." if is_voice else user_text
     history.append({"role": "user", "content": content})
 
     send_typing(chat_id)
@@ -187,21 +163,8 @@ def process_message(chat_id, user_id, user_text, is_voice=False):
 
 
 def handle_update(update):
-    update_id = update["update_id"]
-
-    # Evitar doble procesamiento
-    if update_id in processed_updates:
-        return
-    processed_updates.add(update_id)
-
-    # Limpiar cache viejo (mantener solo los últimos 100)
-    if len(processed_updates) > 100:
-        min_id = min(processed_updates)
-        processed_updates.discard(min_id)
-
     if "message" not in update:
         return
-
     message = update["message"]
     chat_id = message["chat"]["id"]
     user_id = str(chat_id)
@@ -224,40 +187,47 @@ def handle_update(update):
         user_histories[user_id] = []
         send_message(chat_id,
             "Hola! Soy tu Tutor de Ingles Americano AI 🎓🇺🇸\n\n"
-            "Puedes:\n"
-            "🎤 Voz en ingles → te corrijo y escuchas la pronunciacion correcta\n"
-            "📝 Espanol → te enseno como decirlo en ingles\n"
-            "✍️ Ingles escrito → te corrijo los errores\n"
+            "🎤 Voz en ingles → corrección + audio en ingles americano\n"
+            "📝 Espanol → te enseno como decirlo\n"
+            "✍️ Ingles escrito → corrijo errores\n"
             "📚 /ejercicio → practica guiada\n\n"
             "Por donde quieres empezar? 😊"
         )
         return
-
     if text == "/reset":
         user_histories[user_id] = []
         send_message(chat_id, "Conversacion reiniciada!")
         return
-
     if text == "/help":
-        send_message(chat_id,
-            "/start - Iniciar\n"
-            "/reset - Borrar historial\n"
-            "/ejercicio - Ejercicio practico\n"
-            "/help - Ayuda"
-        )
+        send_message(chat_id, "/start /reset /ejercicio /help")
         return
-
     if text == "/ejercicio":
-        text = "Dame un ejercicio corto de ingles americano para practicar."
+        text = "Dame un ejercicio corto de ingles americano."
 
     process_message(chat_id, user_id, text, is_voice=False)
+
+
+def get_start_offset():
+    """Al iniciar, saltarse mensajes viejos para evitar respuestas duplicadas."""
+    try:
+        resp = requests.get(f"{TELEGRAM_BASE}/getUpdates", params={"offset": -1, "timeout": 5}, timeout=10)
+        results = resp.json().get("result", [])
+        if results:
+            latest_id = results[-1]["update_id"]
+            print(f"Saltando mensajes viejos, iniciando desde offset {latest_id + 1}")
+            return latest_id + 1
+    except Exception as e:
+        print(f"Error obteniendo offset inicial: {e}")
+    return 0
 
 
 def main():
     threading.Thread(target=run_server, daemon=True).start()
     print("Bot iniciado!")
 
-    offset = 0
+    # Saltar mensajes viejos al reiniciar
+    offset = get_start_offset()
+
     while True:
         try:
             response = requests.get(
