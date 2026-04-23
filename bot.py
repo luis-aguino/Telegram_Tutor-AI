@@ -15,44 +15,33 @@ TELEGRAM_BASE = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}"
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 GROQ_WHISPER_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 
-# Voces naturales y profesionales
-VOICE_ES = "es-CO-SalomeNeural"   # Español colombiano, profesional
-VOICE_EN = "en-US-JennyNeural"    # Inglés americano, natural y profesional
+# Voz americana natural y profesional
+VOICE_EN = "en-US-JennyNeural"
 
 SYSTEM_PROMPT = """Eres un tutor de inglés amigable, paciente y motivador llamado "Tutor AI". 
-Tu misión es ayudar a hispanohablantes a aprender inglés americano de forma práctica y divertida.
+Tu misión es ayudar a hispanohablantes a aprender inglés americano.
 
 REGLAS:
 - Siempre responde en ESPAÑOL, pero usa el inglés americano para enseñar.
-- Corrige los errores del usuario con amabilidad, sin hacerlos sentir mal.
-- Cuando el usuario escriba o hable en inglés, corrígelo si hay errores y explica por qué.
+- Corrige los errores del usuario con amabilidad.
 - Usa emojis para hacer las conversaciones más amenas.
-- Adapta el nivel de dificultad al usuario (principiante, intermedio o avanzado).
-- Si el usuario comete un error, muestra la forma correcta: ❌ Error → ✅ Correcto.
-- Celebra los logros del usuario con entusiasmo.
+- Adapta el nivel al usuario (principiante, intermedio o avanzado).
+- Si hay error: ❌ Error → ✅ Correcto.
 - Mantén las respuestas concisas (máximo 200 palabras).
-- Enfócate en inglés americano: vocabulario, expresiones y pronunciación americanas.
 
-Al final de cada corrección, incluye una sección así:
-🔊 PRONUNCIA: [escribe aquí SOLO la frase correcta en inglés que el usuario debe practicar]
+MUY IMPORTANTE - Al final de CADA respuesta incluye siempre esta sección:
+🔊 AUDIO: [escribe aquí en inglés americano la frase o corrección completa que el usuario debe escuchar y practicar]
 
-Ejemplo:
-🔊 PRONUNCIA: I want to go to the store
-
-TEMAS QUE PUEDES ENSEÑAR:
-- Vocabulario cotidiano americano
-- Gramática básica y avanzada
-- Frases útiles para viajes, trabajo, etc.
-- Pronunciación americana
-- Conversación simulada
-- Verbos irregulares
-- Tiempos verbales
+Ejemplos de la sección AUDIO:
+- Si corregiste: 🔊 AUDIO: The correct way to say it is: I want to go to the store.
+- Si enseñaste vocabulario: 🔊 AUDIO: Here are today's words: apple, house, beautiful.
+- Si diste ejercicio: 🔊 AUDIO: Repeat after me: How are you doing today? I'm doing great, thank you!
+- Si el usuario habló bien: 🔊 AUDIO: Great job! You said it perfectly: I would like a cup of coffee, please.
 """
 
 user_histories = {}
 
 
-# --- Servidor web para Render ---
 class HealthHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -69,7 +58,6 @@ def run_server():
     server.serve_forever()
 
 
-# --- Funciones de Telegram ---
 def send_message(chat_id, text):
     requests.post(f"{TELEGRAM_BASE}/sendMessage", json={
         "chat_id": chat_id,
@@ -93,35 +81,33 @@ def send_voice_file(chat_id, filepath):
         )
 
 
-# --- Text to Speech con Edge TTS ---
 async def text_to_speech_async(text, voice, output_path):
     communicate = edge_tts.Communicate(text, voice)
     await communicate.save(output_path)
 
 
-def speak(chat_id, text, voice):
-    """Genera audio con Edge TTS y lo envía por Telegram."""
+def speak_english(chat_id, text):
+    """Genera audio en inglés americano y lo envía."""
     try:
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             output_path = f.name
-
-        asyncio.run(text_to_speech_async(text, voice, output_path))
+        asyncio.run(text_to_speech_async(text, VOICE_EN, output_path))
         send_voice_file(chat_id, output_path)
         os.unlink(output_path)
     except Exception as e:
         print(f"Error en TTS: {e}")
 
 
-def extract_english_phrase(reply):
-    """Extrae la frase en inglés marcada con 🔊 PRONUNCIA: ..."""
-    match = re.search(r"🔊 PRONUNCIA:\s*(.+)", reply)
+def extract_audio_phrase(reply):
+    """Extrae la frase en inglés marcada con 🔊 AUDIO: ..."""
+    match = re.search(r"🔊 AUDIO:\s*(.+)", reply)
     if match:
         return match.group(1).strip()
     return None
 
 
-# --- Transcripción con Groq Whisper ---
 def transcribe_voice(file_id):
+    """Transcribe audio con Groq Whisper."""
     try:
         file_info = requests.get(f"{TELEGRAM_BASE}/getFile?file_id={file_id}").json()
         file_path = file_info["result"]["file_path"]
@@ -149,7 +135,6 @@ def transcribe_voice(file_id):
         return ""
 
 
-# --- Groq Chat ---
 def ask_groq(history):
     messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history
     response = requests.post(
@@ -172,7 +157,6 @@ def ask_groq(history):
     return "Respuesta inesperada."
 
 
-# --- Procesador de mensajes ---
 def process_message(chat_id, user_id, text, is_voice=False):
     if user_id not in user_histories:
         user_histories[user_id] = []
@@ -180,7 +164,7 @@ def process_message(chat_id, user_id, text, is_voice=False):
     history = user_histories[user_id]
 
     if is_voice:
-        content = f"[El usuario envió un mensaje de VOZ en inglés. Transcripción: '{text}']. Corrígelo si hay errores y felicítalo si estuvo bien."
+        content = f"[El usuario envió un mensaje de VOZ en inglés. Transcripción: '{text}']. Corrígelo si hay errores, felicítalo si estuvo bien."
     else:
         content = text
 
@@ -190,22 +174,17 @@ def process_message(chat_id, user_id, text, is_voice=False):
     history.append({"role": "assistant", "content": reply})
     user_histories[user_id] = history[-20:]
 
-    # Enviar respuesta en texto
-    send_message(chat_id, reply)
+    # Texto en español (sin la línea de AUDIO)
+    text_reply = re.sub(r"🔊 AUDIO:.*", "", reply).strip()
+    send_message(chat_id, text_reply)
 
-    # Enviar respuesta en español con voz
-    reply_clean = re.sub(r"🔊 PRONUNCIA:.*", "", reply).strip()
-    if reply_clean:
-        speak(chat_id, reply_clean, VOICE_ES)
-
-    # Enviar pronunciación en inglés americano si hay frase para practicar
-    english_phrase = extract_english_phrase(reply)
-    if english_phrase:
-        send_message(chat_id, f"🇺🇸 Así se pronuncia en inglés americano:")
-        speak(chat_id, english_phrase, VOICE_EN)
+    # Audio en inglés americano
+    english_audio = extract_audio_phrase(reply)
+    if english_audio:
+        send_message(chat_id, "🇺🇸 Escucha la pronunciación:")
+        speak_english(chat_id, english_audio)
 
 
-# --- Manejador de updates de Telegram ---
 def handle_update(update):
     if "message" not in update:
         return
@@ -221,7 +200,7 @@ def handle_update(update):
         transcription = transcribe_voice(file_id)
 
         if transcription:
-            send_message(chat_id, f"📝 Escuché: _{transcription}_")
+            send_message(chat_id, f"📝 Escuché: {transcription}")
             process_message(chat_id, user_id, transcription, is_voice=True)
         else:
             send_message(chat_id, "No pude entender el audio. Intenta de nuevo.")
@@ -241,7 +220,7 @@ def handle_update(update):
             "📝 Escribirme en espanol y te enseno como decirlo\n"
             "✍️ Escribirme en ingles y te corrijo los errores\n"
             "📚 Pedir ejercicios con /ejercicio\n\n"
-            "Escucharas la pronunciacion correcta en ingles americano!\n\n"
+            "Escucharas la pronunciacion en ingles americano natural! 🔊\n\n"
             "Por donde quieres empezar? 😊"
         )
         return
@@ -271,8 +250,7 @@ def handle_update(update):
 def main():
     thread = threading.Thread(target=run_server, daemon=True)
     thread.start()
-    print("Servidor web iniciado!")
-    print("Bot iniciado con Edge TTS!")
+    print("Bot iniciado con voz americana!")
 
     offset = 0
     while True:
