@@ -4,8 +4,7 @@ import time
 import threading
 import tempfile
 import requests
-import sys
-import subprocess
+from gtts import gTTS
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
@@ -97,7 +96,7 @@ def clean_for_tts(text):
 
 
 def speak_english(chat_id, text):
-    """Genera audio con voz neural americana edge-tts y lo envia."""
+    """Genera audio en ingles americano con gTTS y lo envia."""
     try:
         clean = clean_for_tts(text)
         print(f"TTS texto: {clean}")
@@ -109,24 +108,15 @@ def speak_english(chat_id, text):
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             output_path = f.name
 
-        # Ejecutar edge-tts en proceso separado con su propio event loop
-        script = f"""
-import asyncio, edge_tts
-asyncio.run(edge_tts.Communicate({repr(clean)}, "en-US-JennyNeural").save({repr(output_path)}))
-"""
-        result = subprocess.run(
-            [sys.executable, "-c", script],
-            capture_output=True, text=True, timeout=30
-        )
-        print(f"edge-tts returncode: {result.returncode}")
-        if result.stderr:
-            print(f"edge-tts stderr: {result.stderr[:200]}")
+        tts = gTTS(text=clean, lang="en", tld="us", slow=False)
+        tts.save(output_path)
 
         size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
         print(f"Audio generado: {size} bytes")
 
         if size > 0:
             send_voice_file(chat_id, output_path)
+            print("Audio enviado")
         else:
             print("Archivo vacio, no se envia")
 
