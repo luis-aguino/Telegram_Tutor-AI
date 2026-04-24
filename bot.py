@@ -108,7 +108,7 @@ def speak_english(chat_id, text):
         with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
             output_path = f.name
 
-        tts = gTTS(text=clean, lang="en", tld="com", slow=False)
+        tts = gTTS(text=clean, lang="en", tld="us", slow=False)
         tts.save(output_path)
 
         size = os.path.getsize(output_path) if os.path.exists(output_path) else 0
@@ -301,9 +301,23 @@ def get_start_offset():
     return 0
 
 
+def keepalive():
+    """Hace ping al propio servidor cada 5 minutos para evitar que Render lo congele."""
+    port = os.environ.get("PORT", "8080")
+    url = f"http://0.0.0.0:{port}/"
+    while True:
+        try:
+            time.sleep(300)  # cada 5 minutos
+            requests.get(url, timeout=10)
+            print("Keepalive ping OK")
+        except Exception as e:
+            print(f"Keepalive error: {e}")
+
+
 def main():
     threading.Thread(target=run_server, daemon=True).start()
-    print("Bot iniciado!")
+    threading.Thread(target=keepalive, daemon=True).start()
+    print("Bot iniciado con keepalive!")
 
     offset = get_start_offset()
     print(f"Offset inicial: {offset}")
@@ -318,6 +332,11 @@ def main():
             for update in response.json().get("result", []):
                 offset = update["update_id"] + 1
                 handle_update(update)
+        except requests.exceptions.Timeout:
+            print("Timeout en getUpdates, reintentando...")
+        except requests.exceptions.ConnectionError:
+            print("Error de conexion, esperando 10s...")
+            time.sleep(10)
         except Exception as e:
             print(f"Error loop: {e}")
             time.sleep(5)
